@@ -124,21 +124,20 @@ func (cl *ContextLayer) Process(ctx context.Context, data *stream.StreamData) (*
 // queryRelevantKnowledge retrieves relevant knowledge items from the knowledge base
 func (cl *ContextLayer) queryRelevantKnowledge(data *stream.StreamData) ([]knowledge.KnowledgeItem, error) {
 	// Build query based on data type and content
-	query := &knowledge.KnowledgeQuery{
-		Type:       data.Type,
-		Attributes: data.Data,
-		Limit:      10,
+	query := knowledge.KnowledgeQuery{
+		Type:  data.Type,
+		Limit: 10,
 	}
 
-	// Add contextual hints from metadata
+	// Add tag-based search if context hint exists
 	if contextHint, exists := data.Metadata["context_hint"]; exists {
 		if hint, ok := contextHint.(string); ok {
-			query.SearchTerms = []string{hint}
+			query.Tags = []string{hint}
 		}
 	}
 
 	// Query the knowledge base
-	items, err := cl.knowledgeBase.Query(query)
+	items, err := cl.knowledgeBase.Query(&query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query knowledge base: %w", err)
 	}
@@ -146,7 +145,7 @@ func (cl *ContextLayer) queryRelevantKnowledge(data *stream.StreamData) ([]knowl
 	// Filter by similarity threshold
 	var relevant []knowledge.KnowledgeItem
 	for _, item := range items {
-		similarity := cl.calculateSimilarity(data.Data, item.Content)
+		similarity := cl.calculateSimilarity(data.Data, item.Data)
 		if similarity >= cl.config.SimilarityThreshold {
 			relevant = append(relevant, item)
 		}
@@ -172,7 +171,7 @@ func (cl *ContextLayer) computeAttentionWeights(data *stream.StreamData, knowled
 	// Boost attention for items matching knowledge
 	for _, item := range knowledge {
 		for key := range data.Data {
-			if _, exists := item.Content[key]; exists {
+			if _, exists := item.Data[key]; exists {
 				weights[key] *= 1.5 // Boost attention for known concepts
 			}
 		}
@@ -225,7 +224,7 @@ func (cl *ContextLayer) buildKnowledgeContext(knowledge []knowledge.KnowledgeIte
 	for itemType, items := range typeGroups {
 		typeContext := make([]map[string]interface{}, 0, len(items))
 		for _, item := range items {
-			typeContext = append(typeContext, item.Content)
+			typeContext = append(typeContext, item.Data)
 		}
 		context[itemType] = typeContext
 	}
@@ -259,7 +258,7 @@ func (cl *ContextLayer) calculateKnowledgeSimilarity(
 	similarities := make(map[string]float64)
 
 	for _, item := range knowledge {
-		similarity := cl.calculateSimilarity(data, item.Content)
+		similarity := cl.calculateSimilarity(data, item.Data)
 		similarities[item.ID] = similarity
 	}
 
@@ -391,7 +390,7 @@ func (cc *ConfidenceCalculator) calculateNoveltyConfidence(
 	for _, item := range knowledge {
 		// Simple matching - could be more sophisticated
 		for key := range interpretation {
-			if _, exists := item.Content[key]; exists {
+			if _, exists := item.Data[key]; exists {
 				matchScore += 1.0
 			}
 		}
