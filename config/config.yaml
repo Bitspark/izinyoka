@@ -1,0 +1,103 @@
+# Izinyoka Configuration File
+
+# Server Configuration
+server:
+  host: "localhost"
+  port: 8080
+  readTimeout: 30  # in seconds
+  writeTimeout: 30  # in seconds
+  maxHeaderBytes: 1048576  # 1MB
+  tls: false
+  enableCORS: true
+  trustedProxies: []
+
+# Knowledge Base Configuration
+knowledge:
+  storagePath: "./data/knowledge"
+  backupEnabled: true
+  backupPath: "./data/backup"
+  maxItems: 10000
+
+# Metabolic Components Configuration
+metabolic:
+  # Glycolytic Cycle (Task Management)
+  glycolytic:
+    maxConcurrentTasks: 10
+    defaultTaskPriority: 5
+    defaultMaxDuration: "5m"  # 5 minutes
+    idleCheckInterval: "30s"  # 30 seconds
+    enableAutoScale: true
+    minWorkers: 2
+    maxWorkers: 20
+
+  # Dreaming Module (Edge Case Exploration)
+  dreaming:
+    enableAutoDreaming: true
+    dreamInterval: "30m"  # 30 minutes
+    maxConcurrentDreams: 3
+    minDreamDuration: "10s"  # 10 seconds
+    maxDreamDuration: "2m"   # 2 minutes
+    retainDreamCount: 100
+    rareEventProbability: 0.1
+    autoApplyInsightProbability: 0.3
+    recurrentDreamFactor: 0.2
+
+  # Lactate Cycle (Partial Computation Storage)
+  lactate:
+    maxPartialComputations: 1000
+    defaultTTL: "24h"  # 24 hours
+    cleanupInterval: "10m"  # 10 minutes
+    prioritizeRecoverable: true
+    maxStorageBytes: 104857600  # 100MB
+
+# Metacognitive Components Configuration
+metacognitive:
+  # Context Layer (Knowledge Integration)
+  context:
+    contextRetentionSize: 100
+    contextExpiration: "24h"  # 24 hours
+    knowledgeThreshold: 0.7
+    maxContexts: 10
+
+  # Reasoning Layer (Logical Processing)
+  reasoning:
+    maxReasoningDepth: 5
+    confidenceThreshold: 0.8
+    timeoutMultiplier: 1.5
+
+  # Intuition Layer (Pattern Recognition)
+  intuition:
+    patternMatchThreshold: 0.6
+    maxPatternComplexity: 10
+    enableFastPath: true
+
+  # Orchestrator (Layer Coordination)
+  orchestrator:
+    balanceThreshold: 0.1
+    adaptiveWeights: true
+    prioritizeConsistency: false
+
+# Logging Configuration
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "text"  # text, json
+  output: "stdout"  # stdout, file
+  enableFile: false
+  filePath: "./logs/izinyoka.log"
+  maxSize: 10  # 10MB
+  maxBackups: 3
+  maxAge: 28  # 28 days
+  compress: true
+
+# Domain-Specific Configuration
+domains:
+  # Genomic domain configuration
+  genomic:
+    referenceGenomeDir: "./data/domains/genomic/references"
+    variantDBDir: "./data/domains/genomic/variants"
+    maxReadLength: 150
+    defaultQualityThreshold: 20
+    enableParallelAlignment: true
+    alignerThreads: 4
+
+  # Add other domains as needed 

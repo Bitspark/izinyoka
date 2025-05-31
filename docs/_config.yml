@@ -1,0 +1,216 @@
+# Izinyoka Documentation Site Configuration
+
+# Site settings
+title: "Izinyoka"
+description: "Biomimetic Metacognitive Architecture for Extreme Domain-Specific AI Systems"
+url: "https://fullscreen-triangle.github.io"
+baseurl: "/izinyoka"
+
+# Author information
+author:
+  name: "Izinyoka Research Team"
+  email: "research@izinyoka.ai"
+
+# Repository information
+github:
+  repository_url: "https://github.com/fullscreen-triangle/izinyoka"
+  is_project_page: true
+
+# Build settings
+markdown: kramdown
+highlighter: rouge
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+  math_engine: mathjax
+
+# Math rendering
+mathjax:
+  enable: true
+  combo: "tex-mml-chtml"
+  source: "//polyfill.io/v3/polyfill.min.js?features=es6%2Cmathjax"
+
+# Theme and styling
+theme: minima
+minima:
+  skin: dark
+  social_links:
+    github: fullscreen-triangle/izinyoka
+    linkedin: izinyoka-research
+
+# Plugins
+plugins:
+  - jekyll-feed
+  - jekyll-sitemap
+  - jekyll-seo-tag
+  - jekyll-redirect-from
+  - jekyll-optional-front-matter
+
+# Navigation
+header_pages:
+  - architecture/index.md
+  - mathematics/index.md
+  - implementation/index.md
+  - experiments/index.md
+  - domains/index.md
+  - getting-started/index.md
+
+# Collections
+collections:
+  docs:
+    output: true
+    permalink: /:collection/:name/
+
+# Defaults
+defaults:
+  - scope:
+      path: ""
+      type: "pages"
+    values:
+      layout: "default"
+      author: "Izinyoka Research Team"
+  - scope:
+      path: ""
+      type: "docs"
+    values:
+      layout: "default"
+      author: "Izinyoka Research Team"
+
+# Exclude from processing
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor/
+  - .bundle/
+  - .sass-cache/
+  - .jekyll-cache/
+  - gemfiles/
+  - node_modules/
+  - "*.gemspec"
+  - "*.log"
+  - package.json
+  - package-lock.json
+  - webpack.config.js
+
+# Include additional files
+include:
+  - _pages
+  - assets
+
+# Permalink structure
+permalink: /:categories/:title/
+
+# Pagination
+paginate: 10
+paginate_path: "/blog/page:num/"
+
+# SEO and social
+twitter:
+  username: izinyoka_ai
+  card: summary_large_image
+
+facebook:
+  app_id: 123456789
+  publisher: izinyoka
+  admins: izinyoka
+
+logo: assets/images/izinyoka-logo.png
+
+# Custom variables
+version: "1.0.0"
+release_date: "2024"
+go_version: "1.20+"
+
+# Analytics (optional)
+google_analytics: UA-XXXXXXXX-X
+
+# Search
+search_enabled: true
+
+# Code highlighting
+highlighter_style: github
+
+# Social proof
+github_stars: true
+github_forks: true
+
+# Custom CSS and JS
+custom_css:
+  - /assets/css/custom.css
+  - /assets/css/math.css
+
+custom_js:
+  - /assets/js/custom.js
+  - /assets/js/charts.js
+
+# Feature flags
+enable_dark_mode: true
+enable_search: true
+enable_comments: false
+enable_analytics: true
+
+# Navigation menu
+navigation:
+  - title: "Home"
+    url: "/"
+  - title: "Architecture"
+    url: "/architecture/"
+  - title: "Mathematics"
+    url: "/mathematics/"
+  - title: "Implementation"
+    url: "/implementation/"
+  - title: "Experiments"
+    url: "/experiments/"
+  - title: "Domains"
+    url: "/domains/"
+  - title: "Getting Started"
+    url: "/getting-started/"
+
+# Footer links
+footer_links:
+  - title: "GitHub"
+    url: "https://github.com/fullscreen-triangle/izinyoka"
+    icon: "fab fa-github"
+  - title: "Documentation"
+    url: "https://fullscreen-triangle.github.io/izinyoka/"
+    icon: "fas fa-book"
+  - title: "Issues"
+    url: "https://github.com/fullscreen-triangle/izinyoka/issues"
+    icon: "fas fa-bug"
+  - title: "Discussions"
+    url: "https://github.com/fullscreen-triangle/izinyoka/discussions"
+    icon: "fas fa-comments"
+
+# Academic settings
+academic:
+  enable_citations: true
+  citation_style: "ieee"
+  enable_bibtex: true
+  enable_math: true
+  enable_diagrams: true
+
+# Research metadata
+research:
+  domain: "Genomics"
+  methodology: "Biomimetic Computing"
+  architecture: "Metacognitive"
+  language: "Go"
+  license: "MIT"
+
+# Performance settings
+compress_html:
+  clippings: all
+  comments: all
+  endings: all
+  startings: []
+  blanklines: false
+  profile: false
+
+# Image optimization
+image_optim:
+  enabled: true
+  quality: 85
+  format: webp
+
+# Caching
+cache_dir: .jekyll-cache 

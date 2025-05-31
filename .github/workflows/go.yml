@@ -77,4 +77,24 @@ jobs:
     - name: Run Gosec Security Scanner
       uses: securego/gosec@master
       with:
-        args: ./... 
+        args: ./...
+
+  compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.19', '1.20', '1.21']
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Go ${{ matrix.go-version }}
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+        cache: true
+
+    - name: Build
+      run: go build -v ./...
+
+    - name: Test
+      run: go test -v ./... 

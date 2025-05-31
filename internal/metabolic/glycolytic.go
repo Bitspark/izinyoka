@@ -2,40 +2,13 @@ package metabolic
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
-	"github.com/fullscreen-triangle/izinyoka/internal/knowledge"
 	"github.com/fullscreen-triangle/izinyoka/internal/stream"
+	"github.com/sirupsen/logrus"
 )
-
-// GlycolicCycle manages task partitioning and resource allocation
-type GlycolicCycle struct {
-	knowledge     *knowledge.KnowledgeBase
-	taskBatchSize int
-	resourceLimit int
-	resourcePool  *ResourcePool
-	active        bool
-	mu            sync.Mutex
-}
-
-// ResourcePool manages computational resources
-type ResourcePool struct {
-	total     int
-	available int
-	mu        sync.Mutex
-}
-
-// Task represents a computational unit
-type Task struct {
-	ID          string
-	Priority    float64
-	Complexity  float64
-	Deadline    time.Time
-	Data        stream.StreamData
-	Status      TaskStatus
-	Allocations map[string]float64
-}
 
 // TaskStatus represents the current state of a task
 type TaskStatus string
@@ -43,275 +16,560 @@ type TaskStatus string
 const (
 	TaskPending    TaskStatus = "pending"
 	TaskProcessing TaskStatus = "processing"
-	TaskComplete   TaskStatus = "complete"
-	TaskIncomplete TaskStatus = "incomplete"
+	TaskCompleted  TaskStatus = "completed"
+	TaskFailed     TaskStatus = "failed"
+	TaskCancelled  TaskStatus = "cancelled"
 )
 
-// GlycolicConfig holds configuration for the glycolytic cycle
-type GlycolicConfig struct {
-	TaskBatchSize  int
-	ResourceLimit  int
-	TimeoutMs      int
-	PriorityLevels int
+// Task represents a unit of work in the glycolytic cycle
+type Task struct {
+	ID           string                 `json:"id"`
+	Type         string                 `json:"type"`
+	Priority     int                    `json:"priority"`
+	Status       TaskStatus             `json:"status"`
+	Data         map[string]interface{} `json:"data"`
+	Result       map[string]interface{} `json:"result,omitempty"`
+	Error        string                 `json:"error,omitempty"`
+	CreatedAt    time.Time              `json:"createdAt"`
+	StartedAt    time.Time              `json:"startedAt,omitempty"`
+	CompletedAt  time.Time              `json:"completedAt,omitempty"`
+	MaxDuration  time.Duration          `json:"maxDuration,omitempty"`
+	Dependencies []string               `json:"dependencies,omitempty"`
 }
 
-// NewGlycolicCycle creates a new glycolytic cycle
-func NewGlycolicCycle(kb *knowledge.KnowledgeBase, config GlycolicConfig) *GlycolicCycle {
-	resourceLimit := config.ResourceLimit
-	if resourceLimit <= 0 {
-		resourceLimit = 100 // Default value
-	}
-
-	return &GlycolicCycle{
-		knowledge:     kb,
-		taskBatchSize: config.TaskBatchSize,
-		resourceLimit: resourceLimit,
-		resourcePool: &ResourcePool{
-			total:     resourceLimit,
-			available: resourceLimit,
-		},
-		active: true,
-	}
+// GlycolyticConfig contains configuration for the glycolytic cycle
+type GlycolyticConfig struct {
+	MaxConcurrentTasks  int           `json:"maxConcurrentTasks"`
+	DefaultTaskPriority int           `json:"defaultTaskPriority"`
+	DefaultMaxDuration  time.Duration `json:"defaultMaxDuration"`
+	IdleCheckInterval   time.Duration `json:"idleCheckInterval"`
+	EnableAutoScale     bool          `json:"enableAutoScale"`
+	MinWorkers          int           `json:"minWorkers"`
+	MaxWorkers          int           `json:"maxWorkers"`
 }
 
-// AllocateTasks breaks down input data into manageable tasks and allocates resources
-func (gc *GlycolicCycle) AllocateTasks(ctx context.Context, input <-chan stream.StreamData) <-chan stream.StreamData {
-	output := make(chan stream.StreamData)
+// GlycolyticCycle implements task management inspired by cellular glycolysis
+type GlycolyticCycle struct {
+	config         GlycolyticConfig
+	tasks          map[string]*Task
+	priorityQueues map[int][]*Task
+	inProgress     map[string]bool
+	dependencies   map[string][]string
+	dependents     map[string][]string
+	workers        []*taskWorker
+	ctx            context.Context
+	cancelFunc     context.CancelFunc
+	mutex          sync.RWMutex
+	taskChan       chan *Task
+	completionChan chan *Task
+	logger         *logrus.Logger
+}
 
-	go func() {
-		defer close(output)
+// taskWorker represents a worker goroutine that processes tasks
+type taskWorker struct {
+	id        int
+	cycle     *GlycolyticCycle
+	ctx       context.Context
+	cancel    context.CancelFunc
+	taskChan  chan *Task
+	idleSince time.Time
+}
 
-		taskBatch := make([]stream.StreamData, 0, gc.taskBatchSize)
-		timer := time.NewTimer(100 * time.Millisecond)
+// NewGlycolyticCycle creates a new instance of the glycolytic cycle
+func NewGlycolyticCycle(ctx context.Context, config GlycolyticConfig) *GlycolyticCycle {
+	if config.MaxConcurrentTasks <= 0 {
+		config.MaxConcurrentTasks = 10
+	}
+	if config.DefaultTaskPriority <= 0 {
+		config.DefaultTaskPriority = 5
+	}
+	if config.DefaultMaxDuration <= 0 {
+		config.DefaultMaxDuration = 5 * time.Minute
+	}
+	if config.IdleCheckInterval <= 0 {
+		config.IdleCheckInterval = 30 * time.Second
+	}
+	if config.MinWorkers <= 0 {
+		config.MinWorkers = 2
+	}
+	if config.MaxWorkers <= 0 {
+		config.MaxWorkers = 20
+	}
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
+	cycleCtx, cancelFunc := context.WithCancel(ctx)
 
-			case data, ok := <-input:
-				if !ok {
-					// Process any remaining tasks
-					if len(taskBatch) > 0 {
-						gc.processBatch(ctx, taskBatch, output)
-					}
-					return
-				}
+	cycle := &GlycolyticCycle{
+		config:         config,
+		tasks:          make(map[string]*Task),
+		priorityQueues: make(map[int][]*Task),
+		inProgress:     make(map[string]bool),
+		dependencies:   make(map[string][]string),
+		dependents:     make(map[string][]string),
+		ctx:            cycleCtx,
+		cancelFunc:     cancelFunc,
+		taskChan:       make(chan *Task, config.MaxConcurrentTasks),
+		completionChan: make(chan *Task, config.MaxConcurrentTasks),
+		logger:         logrus.New(),
+	}
 
-				taskBatch = append(taskBatch, data)
+	// Start the manager and initial workers
+	go cycle.manager()
+	cycle.scaleWorkers(config.MinWorkers)
 
-				// Process batch when it reaches the desired size
-				if len(taskBatch) >= gc.taskBatchSize {
-					gc.processBatch(ctx, taskBatch, output)
-					taskBatch = make([]stream.StreamData, 0, gc.taskBatchSize)
+	return cycle
+}
 
-					// Reset timer
-					if !timer.Stop() {
-						select {
-						case <-timer.C:
-						default:
-						}
-					}
-					timer.Reset(100 * time.Millisecond)
-				}
+// SubmitTask adds a new task to the glycolytic cycle
+func (gc *GlycolyticCycle) SubmitTask(task *Task) (string, error) {
+	gc.mutex.Lock()
+	defer gc.mutex.Unlock()
 
-			case <-timer.C:
-				// Process batch on timeout if not empty
-				if len(taskBatch) > 0 {
-					gc.processBatch(ctx, taskBatch, output)
-					taskBatch = make([]stream.StreamData, 0, gc.taskBatchSize)
-				}
-				timer.Reset(100 * time.Millisecond)
+	// Generate task ID if not provided
+	if task.ID == "" {
+		task.ID = fmt.Sprintf("task-%d", time.Now().UnixNano())
+	}
+
+	// Check if task already exists
+	if _, exists := gc.tasks[task.ID]; exists {
+		return "", fmt.Errorf("task with ID %s already exists", task.ID)
+	}
+
+	// Set defaults
+	if task.Priority <= 0 {
+		task.Priority = gc.config.DefaultTaskPriority
+	}
+	if task.Status == "" {
+		task.Status = TaskPending
+	}
+	if task.MaxDuration <= 0 {
+		task.MaxDuration = gc.config.DefaultMaxDuration
+	}
+	if task.CreatedAt.IsZero() {
+		task.CreatedAt = time.Now()
+	}
+
+	// Register the task
+	gc.tasks[task.ID] = task
+
+	// Add to priority queue
+	priority := task.Priority
+	if _, exists := gc.priorityQueues[priority]; !exists {
+		gc.priorityQueues[priority] = make([]*Task, 0)
+	}
+	gc.priorityQueues[priority] = append(gc.priorityQueues[priority], task)
+
+	// Record dependencies
+	for _, depID := range task.Dependencies {
+		gc.dependencies[task.ID] = append(gc.dependencies[task.ID], depID)
+		gc.dependents[depID] = append(gc.dependents[depID], task.ID)
+	}
+
+	gc.logger.WithFields(logrus.Fields{
+		"taskID":   task.ID,
+		"taskType": task.Type,
+		"priority": task.Priority,
+	}).Info("Task submitted")
+
+	return task.ID, nil
+}
+
+// GetTask retrieves information about a specific task
+func (gc *GlycolyticCycle) GetTask(taskID string) (*Task, error) {
+	gc.mutex.RLock()
+	defer gc.mutex.RUnlock()
+
+	task, exists := gc.tasks[taskID]
+	if !exists {
+		return nil, fmt.Errorf("task %s not found", taskID)
+	}
+
+	return task, nil
+}
+
+// CancelTask cancels a pending or in-progress task
+func (gc *GlycolyticCycle) CancelTask(taskID string) error {
+	gc.mutex.Lock()
+	defer gc.mutex.Unlock()
+
+	task, exists := gc.tasks[taskID]
+	if !exists {
+		return fmt.Errorf("task %s not found", taskID)
+	}
+
+	if task.Status == TaskCompleted || task.Status == TaskFailed || task.Status == TaskCancelled {
+		return fmt.Errorf("cannot cancel task %s with status %s", taskID, task.Status)
+	}
+
+	// Update the task status
+	task.Status = TaskCancelled
+	task.CompletedAt = time.Now()
+
+	// Remove from priority queue if pending
+	if task.Status == TaskPending {
+		priority := task.Priority
+		queue := gc.priorityQueues[priority]
+		for i, t := range queue {
+			if t.ID == taskID {
+				gc.priorityQueues[priority] = append(queue[:i], queue[i+1:]...)
+				break
 			}
 		}
-	}()
-
-	return output
-}
-
-// processBatch handles a batch of tasks
-func (gc *GlycolicCycle) processBatch(
-	ctx context.Context,
-	batch []stream.StreamData,
-	output chan<- stream.StreamData,
-) {
-	// Calculate complexity of each task
-	tasks := make([]Task, len(batch))
-	for i, data := range batch {
-		complexity := calculateComplexity(data)
-		priority := calculatePriority(data)
-
-		tasks[i] = Task{
-			ID:         "task-" + data.ID,
-			Data:       data,
-			Complexity: complexity,
-			Priority:   priority,
-			Deadline:   time.Now().Add(5 * time.Second),
-			Status:     TaskPending,
-		}
 	}
 
-	// Sort tasks by priority (higher priority first)
-	sortTasksByPriority(tasks)
+	// Remove from in-progress if necessary
+	delete(gc.inProgress, taskID)
 
-	// Allocate resources to tasks
-	allocatedTasks := gc.allocateResources(tasks)
+	gc.logger.WithFields(logrus.Fields{
+		"taskID": taskID,
+	}).Info("Task cancelled")
 
-	// Process each allocated task
-	for _, task := range allocatedTasks {
-		select {
-		case <-ctx.Done():
-			return
-		case output <- task.Data:
-			// Task dispatched for processing
-		}
+	return nil
+}
+
+// TaskFromJob converts a stream job to a glycolytic task
+func TaskFromJob(job *stream.Job) *Task {
+	return &Task{
+		ID:          job.ID,
+		Type:        job.ProcessType,
+		Priority:    job.Priority,
+		Status:      TaskPending,
+		Data:        job.InputData,
+		CreatedAt:   time.Now(),
+		MaxDuration: time.Duration(job.MaxDuration) * time.Second,
 	}
 }
 
-// allocateResources distributes available resources to tasks based on priority
-func (gc *GlycolicCycle) allocateResources(tasks []Task) []Task {
-	gc.mu.Lock()
-	defer gc.mu.Unlock()
-
-	if !gc.active {
-		return nil
+// JobFromTask converts a glycolytic task to a stream job
+func JobFromTask(task *Task) *stream.Job {
+	return &stream.Job{
+		ID:          task.ID,
+		InputData:   task.Data,
+		ProcessType: task.Type,
+		Priority:    task.Priority,
+		MaxDuration: int(task.MaxDuration.Seconds()),
+		Results:     task.Result,
 	}
-
-	allocatedTasks := make([]Task, 0, len(tasks))
-
-	gc.resourcePool.mu.Lock()
-	availableResources := gc.resourcePool.available
-	gc.resourcePool.mu.Unlock()
-
-	// Calculate total complexity-adjusted priority
-	var totalPriority float64
-	for _, task := range tasks {
-		totalPriority += task.Priority * task.Complexity
-	}
-
-	// Allocate resources based on priority and complexity
-	remainingResources := availableResources
-	for i := range tasks {
-		if remainingResources <= 0 {
-			break
-		}
-
-		// Calculate fair share of resources
-		share := int((tasks[i].Priority * tasks[i].Complexity / totalPriority) * float64(availableResources))
-		if share > remainingResources {
-			share = remainingResources
-		}
-
-		// Don't allocate if resources are below minimum threshold
-		minResources := int(tasks[i].Complexity * 10)
-		if share < minResources {
-			continue
-		}
-
-		// Update task with resource allocation
-		tasks[i].Status = TaskProcessing
-		tasks[i].Allocations = map[string]float64{
-			"cpu":    float64(share) * 0.8,
-			"memory": float64(share) * 0.2,
-		}
-
-		allocatedTasks = append(allocatedTasks, tasks[i])
-		remainingResources -= share
-	}
-
-	// Update resource pool
-	gc.resourcePool.mu.Lock()
-	gc.resourcePool.available = remainingResources
-	gc.resourcePool.mu.Unlock()
-
-	return allocatedTasks
 }
 
-// Shutdown stops the glycolytic cycle and releases resources
-func (gc *GlycolicCycle) Shutdown(ctx context.Context) {
-	gc.mu.Lock()
-	gc.active = false
-	gc.mu.Unlock()
-
-	// Wait for resources to be released
-	timer := time.NewTimer(100 * time.Millisecond)
-	defer timer.Stop()
+// manager processes task completion and schedules new tasks
+func (gc *GlycolyticCycle) manager() {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	idleCheckTicker := time.NewTicker(gc.config.IdleCheckInterval)
+	defer ticker.Stop()
+	defer idleCheckTicker.Stop()
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-gc.ctx.Done():
 			return
-		case <-timer.C:
-			gc.resourcePool.mu.Lock()
-			available := gc.resourcePool.available
-			total := gc.resourcePool.total
-			gc.resourcePool.mu.Unlock()
 
-			if available == total {
+		case completedTask := <-gc.completionChan:
+			gc.handleCompletedTask(completedTask)
+
+		case <-ticker.C:
+			gc.scheduleNextBatch()
+
+		case <-idleCheckTicker.C:
+			if gc.config.EnableAutoScale {
+				gc.adjustWorkerCount()
+			}
+		}
+	}
+}
+
+// handleCompletedTask processes a task that has finished execution
+func (gc *GlycolyticCycle) handleCompletedTask(task *Task) {
+	gc.mutex.Lock()
+	defer gc.mutex.Unlock()
+
+	// Mark as no longer in progress
+	delete(gc.inProgress, task.ID)
+
+	// Update task in the registry
+	if existingTask, ok := gc.tasks[task.ID]; ok {
+		existingTask.Status = task.Status
+		existingTask.Result = task.Result
+		existingTask.Error = task.Error
+		existingTask.CompletedAt = task.CompletedAt
+	}
+
+	// Process dependent tasks
+	dependents := gc.dependents[task.ID]
+	for _, depID := range dependents {
+		depTask, exists := gc.tasks[depID]
+		if exists && depTask.Status == TaskPending {
+			// Check if all dependencies are satisfied
+			allDependenciesMet := true
+			for _, reqID := range gc.dependencies[depID] {
+				reqTask, reqExists := gc.tasks[reqID]
+				if !reqExists || reqTask.Status != TaskCompleted {
+					allDependenciesMet = false
+					break
+				}
+			}
+
+			// If dependencies are met, task can be scheduled
+			if allDependenciesMet {
+				priority := depTask.Priority
+				if _, exists := gc.priorityQueues[priority]; !exists {
+					gc.priorityQueues[priority] = []*Task{}
+				}
+				gc.priorityQueues[priority] = append(gc.priorityQueues[priority], depTask)
+			}
+		}
+	}
+
+	gc.logger.WithFields(logrus.Fields{
+		"taskID": task.ID,
+		"status": task.Status,
+	}).Info("Task completed")
+}
+
+// scheduleNextBatch schedules available tasks for execution
+func (gc *GlycolyticCycle) scheduleNextBatch() {
+	gc.mutex.Lock()
+	defer gc.mutex.Unlock()
+
+	// Find the highest priority with available tasks
+	highestPriority := 0
+	for priority := range gc.priorityQueues {
+		if len(gc.priorityQueues[priority]) > 0 && priority > highestPriority {
+			highestPriority = priority
+		}
+	}
+
+	// If no tasks are available, return
+	if highestPriority == 0 {
+		return
+	}
+
+	// Get available worker capacity
+	availableCapacity := cap(gc.taskChan) - len(gc.taskChan)
+	if availableCapacity <= 0 {
+		return
+	}
+
+	// Schedule tasks from highest priority queue
+	queue := gc.priorityQueues[highestPriority]
+	for i := 0; i < availableCapacity && i < len(queue); i++ {
+		task := queue[i]
+
+		// Skip tasks that are already in progress or have dependencies
+		if gc.inProgress[task.ID] || !gc.areDependenciesMet(task.ID) {
+			continue
+		}
+
+		// Mark as in progress and dispatch
+		gc.inProgress[task.ID] = true
+		task.Status = TaskProcessing
+		task.StartedAt = time.Now()
+
+		// Remove from queue
+		if i == len(queue)-1 {
+			gc.priorityQueues[highestPriority] = queue[:i]
+		} else {
+			gc.priorityQueues[highestPriority] = append(queue[:i], queue[i+1:]...)
+		}
+
+		// Send to worker
+		select {
+		case gc.taskChan <- task:
+			gc.logger.WithFields(logrus.Fields{
+				"taskID":   task.ID,
+				"priority": task.Priority,
+			}).Debug("Task dispatched to worker")
+		default:
+			// Revert if channel is full
+			gc.inProgress[task.ID] = false
+			task.Status = TaskPending
+			task.StartedAt = time.Time{}
+			gc.priorityQueues[highestPriority] = append(gc.priorityQueues[highestPriority], task)
+		}
+	}
+}
+
+// areDependenciesMet checks if all dependencies of a task are satisfied
+func (gc *GlycolyticCycle) areDependenciesMet(taskID string) bool {
+	deps, exists := gc.dependencies[taskID]
+	if !exists || len(deps) == 0 {
+		return true
+	}
+
+	for _, depID := range deps {
+		depTask, exists := gc.tasks[depID]
+		if !exists || depTask.Status != TaskCompleted {
+			return false
+		}
+	}
+
+	return true
+}
+
+// scaleWorkers adjusts the number of worker goroutines
+func (gc *GlycolyticCycle) scaleWorkers(targetCount int) {
+	gc.mutex.Lock()
+	defer gc.mutex.Unlock()
+
+	currentCount := len(gc.workers)
+
+	// Scale down if needed
+	if currentCount > targetCount {
+		for i := targetCount; i < currentCount; i++ {
+			gc.workers[i].cancel()
+		}
+		gc.workers = gc.workers[:targetCount]
+		return
+	}
+
+	// Scale up if needed
+	for i := currentCount; i < targetCount; i++ {
+		workerCtx, cancel := context.WithCancel(gc.ctx)
+		worker := &taskWorker{
+			id:        i,
+			cycle:     gc,
+			ctx:       workerCtx,
+			cancel:    cancel,
+			taskChan:  gc.taskChan,
+			idleSince: time.Now(),
+		}
+		gc.workers = append(gc.workers, worker)
+		go worker.run()
+	}
+
+	gc.logger.WithFields(logrus.Fields{
+		"oldCount": currentCount,
+		"newCount": targetCount,
+	}).Info("Worker count adjusted")
+}
+
+// adjustWorkerCount automatically scales workers based on workload
+func (gc *GlycolyticCycle) adjustWorkerCount() {
+	gc.mutex.Lock()
+	totalPending := 0
+	for _, queue := range gc.priorityQueues {
+		totalPending += len(queue)
+	}
+	inProgressCount := len(gc.inProgress)
+	currentWorkers := len(gc.workers)
+	gc.mutex.Unlock()
+
+	// Calculate target worker count based on workload
+	targetCount := currentWorkers
+	if totalPending > currentWorkers*2 && currentWorkers < gc.config.MaxWorkers {
+		// Scale up if there are many pending tasks
+		targetCount = min(currentWorkers+2, gc.config.MaxWorkers)
+	} else if inProgressCount < currentWorkers/2 && currentWorkers > gc.config.MinWorkers {
+		// Scale down if workers are underutilized
+		targetCount = max(currentWorkers-1, gc.config.MinWorkers)
+	}
+
+	if targetCount != currentWorkers {
+		gc.scaleWorkers(targetCount)
+	}
+}
+
+// run is the main loop for a worker goroutine
+func (tw *taskWorker) run() {
+	for {
+		select {
+		case <-tw.ctx.Done():
+			return
+
+		case task, ok := <-tw.taskChan:
+			if !ok {
 				return
 			}
-			timer.Reset(100 * time.Millisecond)
+
+			tw.idleSince = time.Time{}
+			tw.processTask(task)
+			tw.idleSince = time.Now()
 		}
 	}
 }
 
-// calculateComplexity estimates the computational complexity of a task
-func calculateComplexity(data stream.StreamData) float64 {
-	// This is a simplistic model - real implementation would be more sophisticated
-	complexity := 1.0
+// processTask handles the execution of a single task
+func (tw *taskWorker) processTask(task *Task) {
+	// Create a timeout context
+	ctx, cancel := context.WithTimeout(tw.ctx, task.MaxDuration)
+	defer cancel()
 
-	// If content is large, increase complexity
-	switch v := data.Content.(type) {
-	case string:
-		complexity += float64(len(v)) / 1000.0
-	case []byte:
-		complexity += float64(len(v)) / 1000.0
-	case map[string]interface{}:
-		complexity += float64(len(v)) / 10.0
-	}
+	// Execute the task
+	logger := tw.cycle.logger.WithFields(logrus.Fields{
+		"taskID":   task.ID,
+		"worker":   tw.id,
+		"taskType": task.Type,
+	})
 
-	// Check metadata for complexity hints
-	if c, ok := data.Metadata["complexity"].(float64); ok {
-		complexity = c
-	}
+	logger.Info("Processing task")
 
-	return complexity
-}
+	// In a real implementation, we would have a registry of task handlers
+	// This is a simplified example where we simulate processing
+	result := make(map[string]interface{})
+	var taskErr error
 
-// calculatePriority determines the processing priority of a task
-func calculatePriority(data stream.StreamData) float64 {
-	// Default priority
-	priority := 1.0
+	// Simulate task processing with timeout
+	done := make(chan bool)
+	go func() {
+		// Simple simulation - in a real implementation this would call appropriate
+		// handler based on task.Type
+		time.Sleep(100 * time.Millisecond)
 
-	// Check if priority is specified in metadata
-	if p, ok := data.Metadata["priority"].(float64); ok {
-		priority = p
-	}
+		// Simulate result based on task data
+		result["processed"] = true
+		result["timestamp"] = time.Now().Unix()
+		if len(task.Data) > 0 {
+			result["input_size"] = len(task.Data)
+		}
 
-	// Boost priority for time-sensitive data
-	if deadline, ok := data.Metadata["deadline"].(time.Time); ok {
-		timeRemaining := time.Until(deadline).Seconds()
-		if timeRemaining < 10 {
-			// Urgency boost for imminent deadlines
-			priority += (10 - timeRemaining) / 2
+		done <- true
+	}()
+
+	// Wait for completion or timeout
+	select {
+	case <-ctx.Done():
+		if ctx.Err() == context.DeadlineExceeded {
+			task.Status = TaskFailed
+			task.Error = "task execution exceeded maximum duration"
+			logger.Warn("Task execution timed out")
+		} else {
+			task.Status = TaskCancelled
+			task.Error = "task was cancelled"
+			logger.Info("Task was cancelled")
+		}
+	case <-done:
+		if taskErr != nil {
+			task.Status = TaskFailed
+			task.Error = taskErr.Error()
+			logger.WithError(taskErr).Error("Task execution failed")
+		} else {
+			task.Status = TaskCompleted
+			task.Result = result
+			logger.Info("Task executed successfully")
 		}
 	}
 
-	return priority
+	// Record completion time
+	task.CompletedAt = time.Now()
+
+	// Send to completion channel
+	select {
+	case tw.cycle.completionChan <- task:
+	default:
+		logger.Error("Failed to send task to completion channel")
+	}
 }
 
-// sortTasksByPriority sorts tasks by priority (higher first)
-func sortTasksByPriority(tasks []Task) {
-	// Simple insertion sort for small batches
-	for i := 1; i < len(tasks); i++ {
-		key := tasks[i]
-		j := i - 1
-
-		for j >= 0 && tasks[j].Priority < key.Priority {
-			tasks[j+1] = tasks[j]
-			j--
-		}
-
-		tasks[j+1] = key
+// helper functions
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
