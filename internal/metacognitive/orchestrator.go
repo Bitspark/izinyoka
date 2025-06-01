@@ -72,6 +72,87 @@ type streamRouter struct {
 	intuitionOutputChan chan *stream.StreamData
 }
 
+// MetacognitiveOrchestrator coordinates the three-layer metacognitive architecture
+type MetacognitiveOrchestrator struct {
+	contextLayer   *ContextLayer
+	reasoningLayer *ReasoningLayer
+	intuitionLayer *IntuitionLayer
+	
+	// Configuration
+	config OrchestratorConfig
+	
+	// State management
+	state         *OrchestratorState
+	metrics       *OrchestratorMetrics
+	mu            sync.RWMutex
+	
+	// Communication channels
+	contextChan   chan *ContextResult
+	reasoningChan chan *ReasoningResult
+	intuitionChan chan *IntuitionResult
+	errorChan     chan error
+	
+	// Lifecycle
+	running bool
+	done    chan struct{}
+}
+
+// OrchestratorState tracks the current state of the orchestrator
+type OrchestratorState struct {
+	CurrentData     *stream.StreamData
+	LastProcessed   time.Time
+	ProcessingCount int64
+	ErrorCount      int64
+	
+	// Layer states
+	ContextActive   bool
+	ReasoningActive bool
+	IntuitionActive bool
+	
+	// Performance tracking
+	AverageProcessingTime time.Duration
+	TotalProcessingTime   time.Duration
+}
+
+// OrchestratorMetrics tracks performance metrics
+type OrchestratorMetrics struct {
+	ProcessingTimes    []time.Duration
+	ConfidenceScores   []float64
+	ThroughputMetrics  map[string]float64
+	ErrorRates         map[string]float64
+	LayerPerformance   map[string]LayerMetrics
+	mu                 sync.RWMutex
+}
+
+// LayerMetrics tracks metrics for individual layers
+type LayerMetrics struct {
+	ProcessingTime time.Duration
+	Confidence     float64
+	ErrorRate      float64
+	Throughput     float64
+}
+
+// ProcessingResult represents the final result from the orchestrator
+type ProcessingResult struct {
+	// Individual layer results
+	ContextResult   *ContextResult
+	ReasoningResult *ReasoningResult
+	IntuitionResult *IntuitionResult
+	
+	// Aggregated results
+	FinalDecision    interface{}
+	Confidence       float64
+	Reasoning        string
+	Patterns         []Pattern
+	Predictions      []Prediction
+	
+	// Metadata
+	ProcessingTime   time.Duration
+	LayerTiming      map[string]time.Duration
+	Timestamp        time.Time
+	InputHash        string
+}
+
 // NewOrchestrator creates a new metacognitive orchestrator
 func NewOrchestrator(
 	contextLayer *ContextLayer,
@@ -205,7 +286,7 @@ func (o *Orchestrator) SubmitJob(ctx context.Context, job *stream.Job) (string, 
 	task := &metabolic.Task{
 		ID:          job.ID,
 		Type:        job.ProcessType,
-		Priority:    job.Priority,
+		Priority:   job.Priority,
 		Status:      metabolic.TaskPending,
 		Data:        job.InputData,
 		CreatedAt:   now,
@@ -941,3 +1022,514 @@ func contains(slice []string, value string) bool {
 	}
 	return false
 }
+
+// NewMetacognitiveOrchestrator creates a new orchestrator
+func NewMetacognitiveOrchestrator(config OrchestratorConfig) *MetacognitiveOrchestrator {
+	orchestrator := &MetacognitiveOrchestrator{
+		contextLayer:   NewContextLayer(config.Context),
+		reasoningLayer: NewReasoningLayer(config.Reasoning),
+		intuitionLayer: NewIntuitionLayer(config.Intuition),
+		config:         config,
+		state:          &OrchestratorState{},
+		metrics:        &OrchestratorMetrics{
+			ThroughputMetrics: make(map[string]float64),
+			ErrorRates:        make(map[string]float64),
+			LayerPerformance:  make(map[string]LayerMetrics),
+		},
+		contextChan:   make(chan *ContextResult, 100),
+		reasoningChan: make(chan *ReasoningResult, 100),
+		intuitionChan: make(chan *IntuitionResult, 100),
+		errorChan:     make(chan error, 100),
+		done:          make(chan struct{}),
+	}
+	
+	return orchestrator
+}
+
+// Start starts the orchestrator
+func (mo *MetacognitiveOrchestrator) Start(ctx context.Context) error {
+	mo.mu.Lock()
+	defer mo.mu.Unlock()
+	
+	if mo.running {
+		return fmt.Errorf("orchestrator is already running")
+	}
+	
+	mo.running = true
+	mo.state.ContextActive = true
+	mo.state.ReasoningActive = true
+	mo.state.IntuitionActive = true
+	
+	// Start background workers if concurrent processing is enabled
+	if mo.config.ConcurrentProcessing {
+		go mo.errorHandler(ctx)
+		go mo.metricsCollector(ctx)
+	}
+	
+	return nil
+}
+
+// Stop stops the orchestrator
+func (mo *MetacognitiveOrchestrator) Stop() error {
+	mo.mu.Lock()
+	defer mo.mu.Unlock()
+	
+	if !mo.running {
+		return fmt.Errorf("orchestrator is not running")
+	}
+	
+	mo.running = false
+	close(mo.done)
+	
+	return nil
+}
+
+// Process processes data through the complete metacognitive pipeline
+func (mo *MetacognitiveOrchestrator) Process(ctx context.Context, data *stream.StreamData) (*ProcessingResult, error) {
+	startTime := time.Now()
+	
+	// Check if orchestrator is running
+	mo.mu.RLock()
+	if !mo.running {
+		mo.mu.RUnlock()
+		return nil, fmt.Errorf("orchestrator is not running")
+	}
+	mo.mu.RUnlock()
+	
+	// Create context with timeout
+	processCtx, cancel := context.WithTimeout(ctx, mo.config.ProcessingTimeout)
+	defer cancel()
+	
+	// Update state
+	mo.updateState(data)
+	
+	var result *ProcessingResult
+	var err error
+	
+	if mo.config.ConcurrentProcessing {
+		result, err = mo.processConcurrent(processCtx, data)
+	} else {
+		result, err = mo.processSequential(processCtx, data)
+	}
+	
+	if err != nil {
+		mo.recordError(err)
+		return nil, err
+	}
+	
+	// Record metrics
+	processingTime := time.Since(startTime)
+	mo.recordMetrics(processingTime, result.Confidence)
+	
+	result.ProcessingTime = processingTime
+	result.Timestamp = startTime
+	
+	return result, nil
+}
+
+// processSequential processes data through layers sequentially
+func (mo *MetacognitiveOrchestrator) processSequential(ctx context.Context, data *stream.StreamData) (*ProcessingResult, error) {
+	layerTiming := make(map[string]time.Duration)
+	
+	// 1. Context Layer Processing
+	contextStart := time.Now()
+	contextResult, err := mo.contextLayer.Process(ctx, data)
+	if err != nil {
+		return nil, fmt.Errorf("context layer processing failed: %w", err)
+	}
+	layerTiming["context"] = time.Since(contextStart)
+	
+	// Check context confidence threshold
+	if contextResult.Confidence < mo.config.MinContextConfidence {
+		return nil, fmt.Errorf("context confidence %.2f below threshold %.2f", 
+			contextResult.Confidence, mo.config.MinContextConfidence)
+	}
+	
+	// 2. Reasoning Layer Processing
+	reasoningStart := time.Now()
+	reasoningResult, err := mo.reasoningLayer.Process(ctx, contextResult.Interpretation)
+	if err != nil {
+		return nil, fmt.Errorf("reasoning layer processing failed: %w", err)
+	}
+	layerTiming["reasoning"] = time.Since(reasoningStart)
+	
+	// Check reasoning confidence threshold
+	if reasoningResult.Confidence < mo.config.MinReasoningConfidence {
+		return nil, fmt.Errorf("reasoning confidence %.2f below threshold %.2f",
+			reasoningResult.Confidence, mo.config.MinReasoningConfidence)
+	}
+	
+	// 3. Intuition Layer Processing
+	intuitionStart := time.Now()
+	intuitionResult, err := mo.intuitionLayer.Process(ctx, contextResult.Interpretation, reasoningResult)
+	if err != nil {
+		return nil, fmt.Errorf("intuition layer processing failed: %w", err)
+	}
+	layerTiming["intuition"] = time.Since(intuitionStart)
+	
+	// Check intuition confidence threshold
+	if intuitionResult.Confidence < mo.config.MinIntuitionConfidence {
+		return nil, fmt.Errorf("intuition confidence %.2f below threshold %.2f",
+			intuitionResult.Confidence, mo.config.MinIntuitionConfidence)
+	}
+	
+	// 4. Aggregate Results
+	finalResult := mo.aggregateResults(contextResult, reasoningResult, intuitionResult)
+	finalResult.LayerTiming = layerTiming
+	
+	return finalResult, nil
+}
+
+// processConcurrent processes data through layers concurrently
+func (mo *MetacognitiveOrchestrator) processConcurrent(ctx context.Context, data *stream.StreamData) (*ProcessingResult, error) {
+	var wg sync.WaitGroup
+	layerTiming := make(map[string]time.Duration)
+	
+	// Channel for collecting results
+	results := make(chan interface{}, 3)
+	errors := make(chan error, 3)
+	
+	// Start context layer (must complete before others can start)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		contextStart := time.Now()
+		contextResult, err := mo.contextLayer.Process(ctx, data)
+		layerTiming["context"] = time.Since(contextStart)
+		
+		if err != nil {
+			errors <- fmt.Errorf("context layer: %w", err)
+			return
+		}
+		
+		if contextResult.Confidence < mo.config.MinContextConfidence {
+			errors <- fmt.Errorf("context confidence %.2f below threshold", contextResult.Confidence)
+			return
+		}
+		
+		results <- contextResult
+		
+		// After context completes, start reasoning and intuition layers
+		if mo.config.LayerSynchronization {
+			wg.Add(2)
+			
+			// Reasoning layer
+			go func() {
+				defer wg.Done()
+				reasoningStart := time.Now()
+				reasoningResult, err := mo.reasoningLayer.Process(ctx, contextResult.Interpretation)
+				layerTiming["reasoning"] = time.Since(reasoningStart)
+				
+				if err != nil {
+					errors <- fmt.Errorf("reasoning layer: %w", err)
+					return
+				}
+				
+				if reasoningResult.Confidence < mo.config.MinReasoningConfidence {
+					errors <- fmt.Errorf("reasoning confidence %.2f below threshold", reasoningResult.Confidence)
+					return
+				}
+				
+				results <- reasoningResult
+			}()
+			
+			// Intuition layer (waits for reasoning to complete)
+			go func() {
+				defer wg.Done()
+				
+				// Wait for reasoning result
+				var reasoningResult *ReasoningResult
+				for i := 0; i < 2; i++ {
+					select {
+					case res := <-results:
+						if rr, ok := res.(*ReasoningResult); ok {
+							reasoningResult = rr
+							break
+						}
+					case <-ctx.Done():
+						errors <- ctx.Err()
+						return
+					}
+				}
+				
+				intuitionStart := time.Now()
+				intuitionResult, err := mo.intuitionLayer.Process(ctx, contextResult.Interpretation, reasoningResult)
+				layerTiming["intuition"] = time.Since(intuitionStart)
+				
+				if err != nil {
+					errors <- fmt.Errorf("intuition layer: %w", err)
+					return
+				}
+				
+				if intuitionResult.Confidence < mo.config.MinIntuitionConfidence {
+					errors <- fmt.Errorf("intuition confidence %.2f below threshold", intuitionResult.Confidence)
+					return
+				}
+				
+				results <- intuitionResult
+			}()
+		}
+	}()
+	
+	// Wait for all layers to complete
+	wg.Wait()
+	close(results)
+	close(errors)
+	
+	// Check for errors
+	select {
+	case err := <-errors:
+		return nil, err
+	default:
+	}
+	
+	// Collect results
+	var contextResult *ContextResult
+	var reasoningResult *ReasoningResult
+	var intuitionResult *IntuitionResult
+	
+	for result := range results {
+		switch r := result.(type) {
+		case *ContextResult:
+			contextResult = r
+		case *ReasoningResult:
+			reasoningResult = r
+		case *IntuitionResult:
+			intuitionResult = r
+		}
+	}
+	
+	// Ensure all results are present
+	if contextResult == nil || reasoningResult == nil || intuitionResult == nil {
+		return nil, fmt.Errorf("incomplete processing results")
+	}
+	
+	// Aggregate results
+	finalResult := mo.aggregateResults(contextResult, reasoningResult, intuitionResult)
+	finalResult.LayerTiming = layerTiming
+	
+	return finalResult, nil
+}
+
+// aggregateResults aggregates results from all three layers
+func (mo *MetacognitiveOrchestrator) aggregateResults(
+	contextResult *ContextResult,
+	reasoningResult *ReasoningResult,
+	intuitionResult *IntuitionResult,
+) *ProcessingResult {
+	
+	// Calculate weighted confidence
+	weightSum := mo.config.ContextWeight + mo.config.ReasoningWeight + mo.config.IntuitionWeight
+	if weightSum == 0 {
+		weightSum = 3.0 // Default equal weights
+		mo.config.ContextWeight = 1.0
+		mo.config.ReasoningWeight = 1.0
+		mo.config.IntuitionWeight = 1.0
+	}
+	
+	aggregatedConfidence := (
+		contextResult.Confidence*mo.config.ContextWeight +
+		reasoningResult.Confidence*mo.config.ReasoningWeight +
+		intuitionResult.Confidence*mo.config.IntuitionWeight,
+	) / weightSum
+	
+	// Create final decision based on highest confidence layer
+	var finalDecision interface{}
+	var reasoning string
+	
+	if contextResult.Confidence >= reasoningResult.Confidence && contextResult.Confidence >= intuitionResult.Confidence {
+		finalDecision = contextResult.Interpretation
+		reasoning = "Context-driven decision based on knowledge integration"
+	} else if reasoningResult.Confidence >= intuitionResult.Confidence {
+		if len(reasoningResult.Conclusions) > 0 {
+			finalDecision = reasoningResult.Conclusions[0].Value
+		}
+		reasoning = "Logic-driven decision based on rule application"
+	} else {
+		if len(intuitionResult.Predictions) > 0 {
+			finalDecision = intuitionResult.Predictions[0].Value
+		}
+		reasoning = "Intuition-driven decision based on pattern recognition"
+	}
+	
+	// Combine patterns and predictions
+	patterns := intuitionResult.RecognizedPatterns
+	predictions := intuitionResult.Predictions
+	
+	return &ProcessingResult{
+		ContextResult:   contextResult,
+		ReasoningResult: reasoningResult,
+		IntuitionResult: intuitionResult,
+		FinalDecision:   finalDecision,
+		Confidence:      aggregatedConfidence,
+		Reasoning:       reasoning,
+		Patterns:        patterns,
+		Predictions:     predictions,
+	}
+}
+
+// updateState updates the orchestrator state
+func (mo *MetacognitiveOrchestrator) updateState(data *stream.StreamData) {
+	mo.mu.Lock()
+	defer mo.mu.Unlock()
+	
+	mo.state.CurrentData = data
+	mo.state.LastProcessed = time.Now()
+	mo.state.ProcessingCount++
+}
+
+// recordError records an error
+func (mo *MetacognitiveOrchestrator) recordError(err error) {
+	mo.mu.Lock()
+	defer mo.mu.Unlock()
+	
+	mo.state.ErrorCount++
+	
+	// Update error rates
+	mo.metrics.mu.Lock()
+	defer mo.metrics.mu.Unlock()
+	
+	errorType := "general"
+	if err != nil {
+		errorType = fmt.Sprintf("%T", err)
+	}
+	
+	mo.metrics.ErrorRates[errorType]++
+}
+
+// recordMetrics records performance metrics
+func (mo *MetacognitiveOrchestrator) recordMetrics(processingTime time.Duration, confidence float64) {
+	mo.mu.Lock()
+	defer mo.mu.Unlock()
+	
+	// Update state metrics
+	mo.state.TotalProcessingTime += processingTime
+	mo.state.AverageProcessingTime = mo.state.TotalProcessingTime / time.Duration(mo.state.ProcessingCount)
+	
+	// Update detailed metrics
+	mo.metrics.mu.Lock()
+	defer mo.metrics.mu.Unlock()
+	
+	mo.metrics.ProcessingTimes = append(mo.metrics.ProcessingTimes, processingTime)
+	mo.metrics.ConfidenceScores = append(mo.metrics.ConfidenceScores, confidence)
+	
+	// Keep only last 1000 measurements to prevent memory growth
+	if len(mo.metrics.ProcessingTimes) > 1000 {
+		mo.metrics.ProcessingTimes = mo.metrics.ProcessingTimes[100:]
+		mo.metrics.ConfidenceScores = mo.metrics.ConfidenceScores[100:]
+	}
+	
+	// Calculate throughput (requests per second)
+	if len(mo.metrics.ProcessingTimes) > 1 {
+		recentTimes := mo.metrics.ProcessingTimes[len(mo.metrics.ProcessingTimes)-10:]
+		avgTime := time.Duration(0)
+		for _, t := range recentTimes {
+			avgTime += t
+		}
+		avgTime /= time.Duration(len(recentTimes))
+		
+		if avgTime > 0 {
+			mo.metrics.ThroughputMetrics["requests_per_second"] = float64(time.Second) / float64(avgTime)
+		}
+	}
+}
+
+// errorHandler handles errors in background
+func (mo *MetacognitiveOrchestrator) errorHandler(ctx context.Context) {
+	for {
+		select {
+		case err := <-mo.errorChan:
+			mo.recordError(err)
+		case <-ctx.Done():
+			return
+		case <-mo.done:
+			return
+		}
+	}
+}
+
+// metricsCollector collects metrics in background
+func (mo *MetacognitiveOrchestrator) metricsCollector(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ticker.C:
+			mo.collectSystemMetrics()
+		case <-ctx.Done():
+			return
+		case <-mo.done:
+			return
+		}
+	}
+}
+
+// collectSystemMetrics collects system-wide metrics
+func (mo *MetacognitiveOrchestrator) collectSystemMetrics() {
+	mo.metrics.mu.Lock()
+	defer mo.metrics.mu.Unlock()
+	
+	// Calculate average confidence over last minute
+	if len(mo.metrics.ConfidenceScores) > 0 {
+		recent := mo.metrics.ConfidenceScores
+		if len(recent) > 60 {
+			recent = recent[len(recent)-60:]
+		}
+		
+		sum := 0.0
+		for _, conf := range recent {
+			sum += conf
+		}
+		mo.metrics.ThroughputMetrics["avg_confidence"] = sum / float64(len(recent))
+	}
+}
+
+// GetMetrics returns current metrics
+func (mo *MetacognitiveOrchestrator) GetMetrics() OrchestratorMetrics {
+	mo.metrics.mu.RLock()
+	defer mo.metrics.mu.RUnlock()
+	
+	// Create a copy to avoid data races
+	metrics := OrchestratorMetrics{
+		ProcessingTimes:   make([]time.Duration, len(mo.metrics.ProcessingTimes)),
+		ConfidenceScores:  make([]float64, len(mo.metrics.ConfidenceScores)),
+		ThroughputMetrics: make(map[string]float64),
+		ErrorRates:        make(map[string]float64),
+		LayerPerformance:  make(map[string]LayerMetrics),
+	}
+	
+	copy(metrics.ProcessingTimes, mo.metrics.ProcessingTimes)
+	copy(metrics.ConfidenceScores, mo.metrics.ConfidenceScores)
+	
+	for k, v := range mo.metrics.ThroughputMetrics {
+		metrics.ThroughputMetrics[k] = v
+	}
+	
+	for k, v := range mo.metrics.ErrorRates {
+		metrics.ErrorRates[k] = v
+	}
+	
+	for k, v := range mo.metrics.LayerPerformance {
+		metrics.LayerPerformance[k] = v
+	}
+	
+	return metrics
+}
+
+// GetState returns current state
+func (mo *MetacognitiveOrchestrator) GetState() OrchestratorState {
+	mo.mu.RLock()
+	defer mo.mu.RUnlock()
+	
+	return *mo.state
+}
+
+// IsRunning returns whether the orchestrator is running
+func (mo *MetacognitiveOrchestrator) IsRunning() bool {
+	mo.mu.RLock()
+	defer mo.mu.RUnlock()
+	
+	return mo.running
+}
+

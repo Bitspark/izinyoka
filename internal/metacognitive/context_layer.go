@@ -124,7 +124,7 @@ func (cl *ContextLayer) Process(ctx context.Context, data *stream.StreamData) (*
 // queryRelevantKnowledge retrieves relevant knowledge items from the knowledge base
 func (cl *ContextLayer) queryRelevantKnowledge(data *stream.StreamData) ([]knowledge.KnowledgeItem, error) {
 	// Build query based on data type and content
-	query := knowledge.KnowledgeQuery{
+	query := &knowledge.KnowledgeQuery{
 		Type:  data.Type,
 		Limit: 10,
 	}
@@ -137,7 +137,7 @@ func (cl *ContextLayer) queryRelevantKnowledge(data *stream.StreamData) ([]knowl
 	}
 
 	// Query the knowledge base
-	items, err := cl.knowledgeBase.Query(&query)
+	items, err := cl.knowledgeBase.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query knowledge base: %w", err)
 	}
